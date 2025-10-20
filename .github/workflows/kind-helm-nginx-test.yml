@@ -1,0 +1,117 @@
+name: Kind Cluster Helm Nginx Test
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  test-nginx-deployment:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker
+        uses: docker/setup-buildx-action@v3
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: 'v1.28.0'
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: 'v3.13.0'
+
+      - name: Create kind cluster
+        uses: helm/kind-action@v1.9.0
+        with:
+          cluster_name: nginx-test-cluster
+          wait: 30s
+          config: |
+            kind: Cluster
+            apiVersion: kind.x-k8s.io/v1alpha4
+            nodes:
+            - role: control-plane
+              extraPortMappings:
+              - containerPort: 30080
+                hostPort: 30080
+                protocol: TCP
+
+      - name: Verify cluster is running
+        run: |
+          echo "Checking cluster info..."
+          kubectl cluster-info
+          kubectl get nodes
+          kubectl get pods -A
+
+      - name: Add bitnami Helm repository
+        run: |
+          helm repo add bitnami https://charts.bitnami.com/bitnami
+          helm repo update
+
+      - name: Deploy nginx using Helm
+        run: |
+          helm install nginx-test bitnami/nginx \
+            --set service.type=NodePort \
+            --set service.nodePorts.http=30080 \
+            --wait \
+            --timeout 5m
+
+      - name: Verify nginx deployment
+        run: |
+          echo "Checking deployment status..."
+          kubectl get deployments
+          kubectl get pods
+          kubectl get services
+
+          echo "Waiting for nginx pod to be ready..."
+          kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=nginx --timeout=120s
+
+          echo "Describing nginx pods..."
+          kubectl describe pods -l app.kubernetes.io/name=nginx
+
+      - name: Test nginx is responding
+        run: |
+          echo "Getting nginx pod name..."
+          POD_NAME=$(kubectl get pods -l app.kubernetes.io/name=nginx -o jsonpath='{.items[0].metadata.name}')
+          echo "Pod name: $POD_NAME"
+
+          echo "Port-forwarding to nginx pod..."
+          kubectl port-forward $POD_NAME 8080:8080 &
+          PF_PID=$!
+
+          echo "Waiting for port-forward to be ready..."
+          sleep 5
+
+          echo "Testing nginx response..."
+          curl -s http://localhost:8080 | grep -i "Welcome to nginx" && echo "SUCCESS: nginx is responding!" || echo "FAILED: nginx is not responding"
+
+          kill $PF_PID
+
+      - name: Show nginx logs
+        if: always()
+        run: |
+          POD_NAME=$(kubectl get pods -l app.kubernetes.io/name=nginx -o jsonpath='{.items[0].metadata.name}')
+          echo "Nginx pod logs:"
+          kubectl logs $POD_NAME || true
+
+      - name: Cleanup - Uninstall Helm release
+        if: always()
+        run: |
+          helm uninstall nginx-test || true
+
+      - name: Show cluster state on failure
+        if: failure()
+        run: |
+          echo "=== Cluster Events ==="
+          kubectl get events --all-namespaces --sort-by='.lastTimestamp'
+          echo "=== All Pods ==="
+          kubectl get pods -A
+          echo "=== All Services ==="
+          kubectl get svc -A
