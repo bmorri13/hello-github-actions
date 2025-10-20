@@ -50,6 +50,12 @@ jobs:
           kubectl get nodes
           kubectl get pods -A
 
+      - name: Create webapp namespace
+        run: |
+          echo "Creating webapp namespace..."
+          kubectl create namespace webapp
+          kubectl get namespaces
+
       - name: Add bitnami Helm repository
         run: |
           helm repo add bitnami https://charts.bitnami.com/bitnami
@@ -58,6 +64,7 @@ jobs:
       - name: Deploy nginx using Helm
         run: |
           helm install nginx-test bitnami/nginx \
+            --namespace webapp \
             --set service.type=NodePort \
             --set service.nodePorts.http=30080 \
             --wait \
@@ -65,25 +72,36 @@ jobs:
 
       - name: Verify nginx deployment
         run: |
-          echo "Checking deployment status..."
-          kubectl get deployments
-          kubectl get pods
-          kubectl get services
+          echo "Checking deployment status in webapp namespace..."
+          kubectl get deployments -n webapp
+          kubectl get pods -n webapp
+          kubectl get services -n webapp
 
           echo "Waiting for nginx pod to be ready..."
-          kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=nginx --timeout=120s
+          kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=nginx -n webapp --timeout=120s
 
           echo "Describing nginx pods..."
-          kubectl describe pods -l app.kubernetes.io/name=nginx
+          kubectl describe pods -l app.kubernetes.io/name=nginx -n webapp
+
+      - name: List all namespaces and pods
+        run: |
+          echo "=== All Namespaces ==="
+          kubectl get namespaces
+          echo ""
+          echo "=== Pods in webapp namespace ==="
+          kubectl get pods -n webapp -o wide
+          echo ""
+          echo "=== All Pods in cluster ==="
+          kubectl get pods -A
 
       - name: Test nginx is responding
         run: |
           echo "Getting nginx pod name..."
-          POD_NAME=$(kubectl get pods -l app.kubernetes.io/name=nginx -o jsonpath='{.items[0].metadata.name}')
+          POD_NAME=$(kubectl get pods -n webapp -l app.kubernetes.io/name=nginx -o jsonpath='{.items[0].metadata.name}')
           echo "Pod name: $POD_NAME"
 
           echo "Port-forwarding to nginx pod..."
-          kubectl port-forward $POD_NAME 8080:8080 &
+          kubectl port-forward -n webapp $POD_NAME 8080:8080 &
           PF_PID=$!
 
           echo "Waiting for port-forward to be ready..."
@@ -97,14 +115,14 @@ jobs:
       - name: Show nginx logs
         if: always()
         run: |
-          POD_NAME=$(kubectl get pods -l app.kubernetes.io/name=nginx -o jsonpath='{.items[0].metadata.name}')
+          POD_NAME=$(kubectl get pods -n webapp -l app.kubernetes.io/name=nginx -o jsonpath='{.items[0].metadata.name}')
           echo "Nginx pod logs:"
-          kubectl logs $POD_NAME || true
+          kubectl logs -n webapp $POD_NAME || true
 
       - name: Cleanup - Uninstall Helm release
         if: always()
         run: |
-          helm uninstall nginx-test || true
+          helm uninstall nginx-test -n webapp || true
 
       - name: Show cluster state on failure
         if: failure()
