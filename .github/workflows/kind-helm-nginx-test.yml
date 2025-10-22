@@ -1,0 +1,160 @@
+name: Kind Cluster Helm Nginx Test
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  test-nginx-deployment:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker
+        uses: docker/setup-buildx-action@v3
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: 'v1.28.0'
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: 'v3.13.0'
+
+      - name: Create kind cluster
+        uses: helm/kind-action@v1.9.0
+        with:
+          cluster_name: nginx-test-cluster
+          wait: 30s
+
+      - name: Verify cluster is running
+        run: |
+          echo "Checking cluster info..."
+          kubectl cluster-info
+          kubectl get nodes
+          kubectl get pods -A
+
+      - name: Create webapp namespace
+        run: |
+          echo "Creating webapp namespace..."
+          kubectl create namespace webapp
+          kubectl get namespaces
+
+      - name: Add bitnami Helm repository
+        run: |
+          helm repo add bitnami https://charts.bitnami.com/bitnami
+          helm repo update
+
+      - name: Deploy nginx using Helm
+        run: |
+          echo "Installing nginx helm chart..."
+          helm install nginx-test bitnami/nginx \
+            --namespace webapp \
+            --set service.type=ClusterIP \
+            --wait \
+            --timeout 5m
+
+          echo "Helm installation completed. Checking status..."
+          helm status nginx-test -n webapp
+
+      - name: Verify nginx deployment
+        run: |
+          echo "Checking deployment status in webapp namespace..."
+          kubectl get deployments -n webapp
+          kubectl get pods -n webapp
+          kubectl get services -n webapp
+
+          echo "Waiting for nginx pod to be ready..."
+          kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=nginx -n webapp --timeout=120s
+
+          echo "Describing nginx pods..."
+          kubectl describe pods -l app.kubernetes.io/name=nginx -n webapp
+
+      - name: List all namespaces and pods
+        run: |
+          echo "=== All Namespaces ==="
+          kubectl get namespaces
+          echo ""
+          echo "=== Pods in webapp namespace ==="
+          kubectl get pods -n webapp -o wide
+          echo ""
+          echo "=== All Pods in cluster ==="
+          kubectl get pods -A
+
+      - name: Test nginx is responding
+        run: |
+          echo "Getting nginx pod name..."
+          POD_NAME=$(kubectl get pods -n webapp -l app.kubernetes.io/name=nginx -o jsonpath='{.items[0].metadata.name}')
+          echo "Pod name: $POD_NAME"
+
+          if [ -z "$POD_NAME" ]; then
+            echo "ERROR: No nginx pod found!"
+            exit 1
+          fi
+
+          echo "Port-forwarding to nginx pod..."
+          kubectl port-forward -n webapp $POD_NAME 8080:8080 &
+          PF_PID=$!
+
+          echo "Waiting for port-forward to be ready..."
+          sleep 10
+
+          # Check if port-forward is still running
+          if ! ps -p $PF_PID > /dev/null; then
+            echo "ERROR: Port-forward process died!"
+            exit 1
+          fi
+
+          echo "Testing nginx response..."
+          RESPONSE=$(curl -s -w "\n%{http_code}" http://localhost:8080 || echo "000")
+          HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+          BODY=$(echo "$RESPONSE" | head -n-1)
+
+          echo "HTTP Status Code: $HTTP_CODE"
+
+          if [ "$HTTP_CODE" = "200" ] && echo "$BODY" | grep -qi "nginx"; then
+            echo "SUCCESS: nginx is responding!"
+          else
+            echo "FAILED: nginx is not responding correctly"
+            echo "Response body: $BODY"
+            kill $PF_PID || true
+            exit 1
+          fi
+
+          kill $PF_PID || true
+
+      - name: Show nginx logs
+        if: always()
+        run: |
+          echo "Fetching nginx pod logs..."
+          POD_NAME=$(kubectl get pods -n webapp -l app.kubernetes.io/name=nginx -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+
+          if [ -z "$POD_NAME" ]; then
+            echo "WARNING: No nginx pod found to show logs"
+            kubectl get pods -n webapp || true
+          else
+            echo "Nginx pod logs for $POD_NAME:"
+            kubectl logs -n webapp $POD_NAME --tail=100 || true
+          fi
+
+      - name: Cleanup - Uninstall Helm release
+        if: always()
+        run: |
+          helm uninstall nginx-test -n webapp || true
+
+      - name: Show cluster state on failure
+        if: failure()
+        run: |
+          echo "=== Cluster Events ==="
+          kubectl get events --all-namespaces --sort-by='.lastTimestamp'
+          echo "=== All Pods ==="
+          kubectl get pods -A
+          echo "=== All Services ==="
+          kubectl get svc -A
