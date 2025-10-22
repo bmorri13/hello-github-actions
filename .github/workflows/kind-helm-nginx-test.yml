@@ -33,15 +33,6 @@ jobs:
         with:
           cluster_name: nginx-test-cluster
           wait: 30s
-          config: |
-            kind: Cluster
-            apiVersion: kind.x-k8s.io/v1alpha4
-            nodes:
-            - role: control-plane
-              extraPortMappings:
-              - containerPort: 30080
-                hostPort: 30080
-                protocol: TCP
 
       - name: Verify cluster is running
         run: |
@@ -66,8 +57,7 @@ jobs:
           echo "Installing nginx helm chart..."
           helm install nginx-test bitnami/nginx \
             --namespace webapp \
-            --set service.type=NodePort \
-            --set service.nodePorts.http=30080 \
+            --set service.type=ClusterIP \
             --wait \
             --timeout 5m
 
